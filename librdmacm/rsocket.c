@@ -382,6 +382,8 @@ struct rsocket {
 	dlist_entry	  iomap_queue;
 	int		  iomap_pending;
 	int		  unack_cqe;
+
+	int		  polling_latency;    /* PROJ-2681 */
 };
 
 #define DS_UDP_TAG 0x55555555
@@ -612,6 +614,7 @@ static struct rsocket *rs_alloc(struct rsocket *inherited_rs, int type)
 			rs->ctrl_max_seqno = inherited_rs->ctrl_max_seqno;
 			rs->target_iomap_size = inherited_rs->target_iomap_size;
 		}
+		rs->polling_latency = inherited_rs->polling_latency; /* PROJ-2681 */
 	} else {
 		rs->sbuf_size = def_wmem;
 		rs->rbuf_size = def_mem;
@@ -794,7 +797,10 @@ static int rs_create_cq(struct rsocket *rs, struct rdma_cm_id *cm_id)
 			goto err2;
 	}
 
-	ibv_req_notify_cq(cm_id->recv_cq, 0);
+	/* PROJ-2681 */
+	if (rs->polling_latency == 0)
+		ibv_req_notify_cq(cm_id->recv_cq, 0);
+
 	cm_id->send_cq_channel = cm_id->recv_cq_channel;
 	cm_id->send_cq = cm_id->recv_cq;
 	return 0;
@@ -2042,12 +2048,16 @@ static int rs_process_cq(struct rsocket *rs, int nonblock, int (*test)(struct rs
 			rs->cq_armed = 1;
 		} else {
 			rs_update_credits(rs);
-			fastlock_acquire(&rs->cq_wait_lock);
-			fastlock_release(&rs->cq_lock);
 
-			ret = rs_get_cq_event(rs);
-			fastlock_release(&rs->cq_wait_lock);
-			fastlock_acquire(&rs->cq_lock);
+			/* PROJ-2681 */
+			if (rs->polling_latency == 0) {
+				fastlock_acquire(&rs->cq_wait_lock);
+				fastlock_release(&rs->cq_lock);
+
+				ret = rs_get_cq_event(rs);
+				fastlock_release(&rs->cq_wait_lock);
+				fastlock_acquire(&rs->cq_lock);
+			}
 		}
 	} while (!ret);
 
@@ -3489,10 +3499,16 @@ int rsetsockopt(int socket, int level, int optname,
 		}
 		break;
 	case SOL_RDMA:
+		if (optname == RDMA_LATENCY) {   /* PROJ-2681 */
+			goto skip_checking_state;
+		}
+
 		if (rs->state >= rs_opening) {
 			ret = ERR(EINVAL);
 			break;
 		}
+
+skip_checking_state:
 
 		switch (optname) {
 		case RDMA_SQSIZE:
@@ -3523,6 +3539,10 @@ int rsetsockopt(int socket, int level, int optname,
 			} else {
 				ret = ERR(ENOMEM);
 			}
+			break;
+		case RDMA_LATENCY:    /* PROJ-2681 */
+			rs->polling_latency = *(int *) optval;
+			ret = 0;
 			break;
 		default:
 			break;
@@ -3695,6 +3715,10 @@ int rgetsockopt(int socket, int level, int optname,
 					ret = 0;
 				}
 			}
+			break;
+		case RDMA_LATENCY:    /* PROJ-2681 */
+			*((int *) optval) = rs->polling_latency;
+			*optlen = sizeof(int);
 			break;
 		default:
 			ret = ENOTSUP;

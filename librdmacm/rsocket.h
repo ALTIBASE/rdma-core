@@ -79,7 +79,9 @@ enum {
 	RDMA_RQSIZE,
 	RDMA_INLINE,
 	RDMA_IOMAPSIZE,
-	RDMA_ROUTE
+	RDMA_ROUTE,
+
+	RDMA_LATENCY = 1000    /* PROJ-2681 */
 };
 
 int rsetsockopt(int socket, int level, int optname,
